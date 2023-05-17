@@ -131,7 +131,7 @@ func (dr *DNSRecord) String() string {
 	sb.WriteString(fmt.Sprintf(", rdLength: %d", dr.RdLength))
 
 	switch dr.Type {
-	case TYPE_NS:
+	case TYPE_NS, TYPE_CNAME:
 		sb.WriteString(fmt.Sprintf(", rdata: %s", string(dr.Rdata)))
 	case TYPE_A:
 		sb.WriteString(fmt.Sprintf(", rdata: %s", ip2String(dr.Rdata)))
@@ -156,7 +156,7 @@ func parseRecord(reader *bytes.Reader) (*DNSRecord, error) {
 
 	var data []byte
 	switch subDNSRecord.Type {
-	case TYPE_NS:
+	case TYPE_NS, TYPE_CNAME:
 		// the NS record type. This record type says “hey, I don’t have the answer, but this other server does, ask them instead”.
 		data, err = decodeName(reader)
 		if err != nil {
@@ -324,8 +324,9 @@ func parsePacket(data []byte) (*DNSPacket, error) {
 }
 
 const (
-	TYPE_A  uint16 = 1
-	TYPE_NS uint16 = 2
+	TYPE_A     uint16 = 1
+	TYPE_NS    uint16 = 2
+	TYPE_CNAME uint16 = 5
 
 	CLASS_IN = 1
 )
@@ -422,6 +423,16 @@ func getNameServer(packet *DNSPacket) string {
 	return ""
 }
 
+func getCanonical(packet *DNSPacket) string {
+	for _, ans := range packet.Answers {
+		if ans.Type == TYPE_CNAME {
+			return string(ans.Rdata)
+		}
+	}
+
+	return ""
+}
+
 func resolve(domainName string, recordType uint16) (string, error) {
 	// Real DNS resolvers actually do hardcode the IP addresses of the root nameservers.
 	// This is because if you’re implementing DNS, you have to start somewhere
@@ -451,6 +462,12 @@ func resolve(domainName string, recordType uint16) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			continue
+		}
+
+		canonical := getCanonical(packet)
+		if canonical != "" {
+			domainName = canonical
 			continue
 		}
 
