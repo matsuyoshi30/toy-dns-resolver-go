@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -128,7 +129,16 @@ func (dr *DNSRecord) String() string {
 	sb.WriteString(fmt.Sprintf(", class: %d", dr.Class))
 	sb.WriteString(fmt.Sprintf(", ttl: %d", dr.Ttl))
 	sb.WriteString(fmt.Sprintf(", rdLength: %d", dr.RdLength))
-	sb.WriteString(fmt.Sprintf(", rdata: %x", dr.Rdata))
+
+	switch dr.Type {
+	case TYPE_NS:
+		sb.WriteString(fmt.Sprintf(", rdata: %s", string(dr.Rdata)))
+	case TYPE_A:
+		sb.WriteString(fmt.Sprintf(", rdata: %s", ip2String(dr.Rdata)))
+	default:
+		sb.WriteString(fmt.Sprintf(", rdata: %x", dr.Rdata))
+	}
+
 	return sb.String()
 }
 
@@ -144,10 +154,20 @@ func parseRecord(reader *bytes.Reader) (*DNSRecord, error) {
 		return nil, err
 	}
 
-	data := make([]byte, subDNSRecord.RdLength)
-	_, err = reader.Read(data)
-	if err != nil {
-		return nil, err
+	var data []byte
+	switch subDNSRecord.Type {
+	case TYPE_NS:
+		// the NS record type. This record type says “hey, I don’t have the answer, but this other server does, ask them instead”.
+		data, err = decodeName(reader)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		data = make([]byte, subDNSRecord.RdLength)
+		_, err = reader.Read(data)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &DNSRecord{
@@ -304,7 +324,9 @@ func parsePacket(data []byte) (*DNSPacket, error) {
 }
 
 const (
-	TYPE_A   = 1
+	TYPE_A  uint16 = 1
+	TYPE_NS uint16 = 2
+
 	CLASS_IN = 1
 )
 
@@ -314,11 +336,10 @@ func buildQuery(domainName string, recordType uint16) ([]byte, error) {
 		return nil, err
 	}
 	id := rand.Intn(65535)
-	RECURSION_DESIRED := 1 << 8
 
 	header := DNSHeader{
 		TransactionId: uint16(id),
-		Flags:         uint16(RECURSION_DESIRED),
+		Flags:         0,
 		QdCount:       1,
 	}
 	headerBytes, err := headerToBytes(header)
@@ -342,36 +363,129 @@ func buildQuery(domainName string, recordType uint16) ([]byte, error) {
 	return append(headerBytes, questionBytes...), nil
 }
 
-func run() {
-	query, err := buildQuery("example.com", TYPE_A)
+func sendQuery(ipAddress, domainName string, recordType uint16) (*DNSPacket, error) {
+	query, err := buildQuery(domainName, recordType)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
-	conn, err := net.Dial("udp", "8.8.8.8:53")
+	conn, err := net.Dial("udp", ipAddress+":53")
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	defer conn.Close()
 
 	_, err = conn.Write(query)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	response := make([]byte, 1024)
 	_, err = conn.Read(response)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
-	packet, err := parsePacket(response)
+	return parsePacket(response)
+}
+
+func getAnswer(packet *DNSPacket) []byte {
+	for _, ans := range packet.Answers {
+		// return the first A record in the Answer section
+		if ans.Type == TYPE_A {
+			return ans.Rdata
+		}
+	}
+
+	return nil
+}
+
+func getNameServerIP(packet *DNSPacket) []byte {
+	for _, add := range packet.Additionals {
+		// return the first A record in the Additional section
+		if add.Type == TYPE_A {
+			return add.Rdata
+		}
+	}
+
+	return nil
+}
+
+func getNameServer(packet *DNSPacket) string {
+	for _, aut := range packet.Authorities {
+		// return the first NS record in the Authority section
+		if aut.Type == TYPE_NS {
+			return string(aut.Rdata)
+		}
+	}
+
+	return ""
+}
+
+func resolve(domainName string, recordType uint16) (string, error) {
+	// Real DNS resolvers actually do hardcode the IP addresses of the root nameservers.
+	// This is because if you’re implementing DNS, you have to start somewhere
+	// – if you’re implementing DNS, you can’t use DNS to look up the IP address.
+	nameServer := "198.41.0.4"
+	for {
+		fmt.Printf("Querying %s for %s\n", nameServer, domainName)
+		packet, err := sendQuery(nameServer, domainName, recordType)
+		if err != nil {
+			return "", err
+		}
+
+		ip := getAnswer(packet)
+		if ip != nil {
+			return ip2String(ip), nil
+		}
+
+		nsIP := getNameServerIP(packet)
+		if nsIP != nil {
+			nameServer = ip2String(nsIP)
+			continue
+		}
+
+		nsDomain := getNameServer(packet)
+		if nsDomain != "" {
+			nameServer, err = resolve(nsDomain, TYPE_A)
+			if err != nil {
+				return "", err
+			}
+			continue
+		}
+
+		return "", fmt.Errorf("something went wrong")
+	}
+}
+
+func run(domainName string) {
+	packet, err := sendQuery("198.41.0.4", domainName, TYPE_A)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(ip2String(packet.Answers[0].Rdata))
+	fmt.Println("Answers ===")
+	for _, ans := range packet.Answers {
+		fmt.Println(ans)
+	}
+	fmt.Println("Authorities ===")
+	for _, aut := range packet.Authorities {
+		fmt.Println(aut)
+	}
+	fmt.Println("Additionals ===")
+	for _, add := range packet.Additionals {
+		fmt.Println(add)
+	}
 }
 
 func main() {
-	run() // 93.184.216.34
+	if len(os.Args) != 2 {
+		fmt.Printf("Usage: %s <domainName>\n", os.Args[0])
+		return
+	}
+
+	ip, err := resolve(os.Args[1], TYPE_A)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(ip)
 }
