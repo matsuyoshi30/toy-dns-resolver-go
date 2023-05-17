@@ -276,7 +276,7 @@ func parsePacket(data []byte) (*DNSPacket, error) {
 		answers[i] = answer
 	}
 
-	authorities := make([]*DNSRecord, header.AnCount)
+	authorities := make([]*DNSRecord, header.NsCount)
 	for i := range authorities {
 		authority, err := parseRecord(reader)
 		if err != nil {
@@ -285,7 +285,7 @@ func parsePacket(data []byte) (*DNSPacket, error) {
 		authorities[i] = authority
 	}
 
-	additionals := make([]*DNSRecord, header.AnCount)
+	additionals := make([]*DNSRecord, header.ArCount)
 	for i := range additionals {
 		additional, err := parseRecord(reader)
 		if err != nil {
